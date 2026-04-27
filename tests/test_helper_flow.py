@@ -184,6 +184,29 @@ class Human20HelperFlowTests(unittest.TestCase):
         self.assertEqual(lesson1['expectedHomeworkTaskIds'], ['l1-1', 'l1-2'])
         self.assertEqual(lesson1['missingHomeworkTaskIds'], ['l1-2'])
 
+    def test_build_auto_sync_plan_can_be_scoped_to_single_lesson(self):
+        local = {
+            'lessons': [
+                {
+                    'id': 'lesson-1',
+                    'status': 'auto-pass',
+                    'requiredEvidenceVerdicts': [{'matched': True}],
+                },
+                {
+                    'id': 'lesson-2',
+                    'status': 'auto-pass',
+                    'requiredEvidenceVerdicts': [{'matched': True}],
+                },
+            ]
+        }
+        progress = {'completedItems': []}
+        homework = {'progress': {'lesson-1': ['l1-1'], 'lesson-2': ['l2-1']}}
+
+        plan = helper_flow.build_auto_sync_plan(progress, homework, local, lesson_ids=['lesson-1'])
+
+        self.assertEqual([item['lessonId'] for item in plan], ['lesson-1'])
+        self.assertIn('l1-2', plan[0]['missingHomeworkTaskIds'])
+
     def test_build_auto_sync_plan_blocks_on_unexpected_live_task_ids(self):
         local = {
             'lessons': [

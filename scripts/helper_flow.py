@@ -54,14 +54,23 @@ def fetch_homework_catalogs(client, local):
     return catalogs
 
 
-def build_auto_sync_plan(progress, homework_progress, local, homework_catalogs=None):
+def _normalize_lesson_scope(lesson_ids=None):
+    if lesson_ids is None:
+        return None
+    return {lesson_id for lesson_id in lesson_ids if lesson_id}
+
+
+def build_auto_sync_plan(progress, homework_progress, local, homework_catalogs=None, lesson_ids=None):
     rule_map = rules_map()
     completed_items = set(progress.get('completedItems', [])) if isinstance(progress, dict) else set()
     homework_map = (homework_progress or {}).get('progress', {}) if isinstance(homework_progress, dict) else {}
     homework_catalogs = homework_catalogs or {}
+    lesson_scope = _normalize_lesson_scope(lesson_ids)
     plan = []
     for lesson in local.get('lessons', []):
         lesson_id = lesson['id']
+        if lesson_scope is not None and lesson_id not in lesson_scope:
+            continue
         catalog = homework_catalogs.get(lesson_id)
         catalog_tasks = _catalog_task_ids(catalog)
         if catalog_tasks:
@@ -99,8 +108,8 @@ def build_auto_sync_plan(progress, homework_progress, local, homework_catalogs=N
     return plan
 
 
-def run_auto_sync(client, progress, homework_progress, local, homework_catalogs=None):
-    plan = build_auto_sync_plan(progress, homework_progress, local, homework_catalogs)
+def run_auto_sync(client, progress, homework_progress, local, homework_catalogs=None, lesson_ids=None):
+    plan = build_auto_sync_plan(progress, homework_progress, local, homework_catalogs, lesson_ids=lesson_ids)
     applied = []
     skipped = []
     errors = []
@@ -662,7 +671,13 @@ def main():
     digest = safe_call(client, 'get_digest')
     homework_progress = safe_call(client, 'get_homework_progress')
     homework_catalogs = fetch_homework_catalogs(client, local)
-    sync_result = run_auto_sync(client, progress, homework_progress, local, homework_catalogs)
+    sync_lesson_ids = None
+    if args.mode == 'continue' and args.lesson:
+        sync_lesson_ids = [args.lesson]
+    elif args.mode == 'verify':
+        verify_lesson = args.lesson or (first_unfinished(local['lessons']) or {}).get('id') or 'lesson-1'
+        sync_lesson_ids = [verify_lesson]
+    sync_result = run_auto_sync(client, progress, homework_progress, local, homework_catalogs, lesson_ids=sync_lesson_ids)
     progress = sync_result.get('progress', progress)
     homework_progress = sync_result.get('homework', homework_progress)
 
