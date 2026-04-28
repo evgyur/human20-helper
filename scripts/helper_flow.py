@@ -187,29 +187,83 @@ def workshop_lesson_map(workshop):
     return {x['id']: x for x in workshop.get('lessons', [])}
 
 
-def build_summary(workshop, progress, onboarding, digest, local):
+def _homework_progress_map(homework_progress):
+    if not isinstance(homework_progress, dict):
+        return {}
+    progress = homework_progress.get('progress')
+    return progress if isinstance(progress, dict) else {}
+
+
+def build_homework_summary(homework_progress, homework_catalogs=None):
+    homework_map = _homework_progress_map(homework_progress)
+    homework_catalogs = homework_catalogs or {}
+    summary = []
+    for rule in load_rules():
+        lesson_id = rule['id']
+        catalog = homework_catalogs.get(lesson_id)
+        catalog_tasks = _catalog_task_ids(catalog)
+        if catalog_tasks:
+            expected_tasks = catalog_tasks
+            completed_tasks = set(_catalog_completed_task_ids(catalog))
+            mapping_source = 'get_homework_catalog'
+        else:
+            expected_tasks = rule.get('homeworkTaskIds', [])
+            completed_tasks = set(homework_map.get(lesson_id, []))
+            mapping_source = 'lesson_rules.json'
+        completed_count = len([task_id for task_id in expected_tasks if task_id in completed_tasks])
+        expected_count = len(expected_tasks)
+        summary.append({
+            'lessonId': lesson_id,
+            'title': rule.get('title'),
+            'completedCount': completed_count,
+            'expectedCount': expected_count,
+            'done': expected_count > 0 and completed_count >= expected_count,
+            'mappingSource': mapping_source,
+            'completedHomeworkTaskIds': [task_id for task_id in expected_tasks if task_id in completed_tasks],
+            'missingHomeworkTaskIds': [task_id for task_id in expected_tasks if task_id not in completed_tasks],
+        })
+    return summary
+
+
+def first_unfinished_homework(homework_lessons):
+    for item in homework_lessons:
+        if not item.get('done'):
+            return item
+    return None
+
+
+def build_summary(workshop, progress, onboarding, digest, local, homework_progress=None, homework_catalogs=None):
     lessons = local['lessons']
-    next_lesson = first_unfinished(lessons)
+    completed_items = progress.get('completedItems', []) if isinstance(progress, dict) else []
+    homework_lessons = build_homework_summary(homework_progress, homework_catalogs)
+    use_homework_progress = not completed_items and any(item.get('completedCount', 0) > 0 for item in homework_lessons)
+    homework_next_lesson = first_unfinished_homework(homework_lessons) if use_homework_progress else None
+    next_lesson = None if use_homework_progress else first_unfinished(lessons)
     lesson_map = workshop_lesson_map(workshop)
     rule_map = rules_map()
-    href = lesson_map.get(next_lesson['id'], {}).get('href') if next_lesson else None
-    practical = rule_map.get(next_lesson['id'], {}).get('practicalActions', []) if next_lesson else []
+    next_lesson_id = homework_next_lesson['lessonId'] if homework_next_lesson else (next_lesson['id'] if next_lesson else None)
+    href = lesson_map.get(next_lesson_id, {}).get('href') if next_lesson_id else None
+    practical = rule_map.get(next_lesson_id, {}).get('practicalActions', []) if next_lesson_id else []
+    fallback_questions = rule_map.get(next_lesson_id, {}).get('fallbackQuestions', []) if next_lesson_id else []
+    next_step = rule_map.get(next_lesson_id, {}).get('nextStep') if next_lesson_id else None
     return {
         'mcp': {
-            'completedItems': progress.get('completedItems', []),
+            'completedItems': completed_items,
             'completedCount': onboarding.get('completedCount') or digest.get('completedCount'),
             'digestFocus': digest.get('focus'),
             'onboardingStatus': onboarding.get('status'),
         },
         'localLessons': lessons,
+        'homeworkLessons': homework_lessons,
+        'useHomeworkProgress': use_homework_progress,
         'nextLesson': {
-            'id': next_lesson['id'] if next_lesson else None,
-            'title': next_lesson['title'] if next_lesson else None,
-            'state': lesson_state(next_lesson['status']) if next_lesson else 'done',
+            'id': next_lesson_id,
+            'title': (homework_next_lesson.get('title') if homework_next_lesson else next_lesson['title']) if next_lesson_id else None,
+            'state': 'needs_work' if homework_next_lesson else (lesson_state(next_lesson['status']) if next_lesson else 'done'),
             'href': href,
-            'nextStep': next_lesson['nextStep'] if next_lesson else 'Все основные уроки локально подтверждены.',
+            'nextStep': next_step or (next_lesson['nextStep'] if next_lesson else 'Все основные уроки локально подтверждены.'),
             'practicalActions': practical,
-            'fallbackQuestions': next_lesson['fallbackQuestions'] if next_lesson else [],
+            'fallbackQuestions': fallback_questions if homework_next_lesson else (next_lesson['fallbackQuestions'] if next_lesson else []),
         }
     }
 
@@ -318,6 +372,29 @@ def build_next_action(summary):
 def build_human_output(summary):
     next_lesson = summary['nextLesson']
     lines = []
+    if summary.get('useHomeworkProgress'):
+        lines.append('Текущее состояние по урокам (по homework в Human20):')
+        for lesson in summary.get('homeworkLessons', []):
+            status_label = 'завершено' if lesson.get('done') else 'не завершено'
+            lines.append(f"- {lesson['lessonId']}: {status_label} ({lesson.get('completedCount', 0)}/{lesson.get('expectedCount', 0)})")
+        lines.append('')
+        lines.append('Локальная проверка файлов и артефактов может отставать от факта завершения в Human20.')
+        if next_lesson['id']:
+            lines.append('')
+            lines.append('Следующий этап:')
+            lines.append(f"- {next_lesson['title']}")
+            if next_lesson['href']:
+                lines.append(f"- ссылка: {next_lesson['href']}")
+            lines.append(f"- следующий шаг: {next_lesson['nextStep']}")
+            if next_lesson['practicalActions']:
+                lines.append('- что делать сейчас:')
+                for action in next_lesson['practicalActions']:
+                    lines.append(f"  - {action}")
+        else:
+            lines.append('')
+            lines.append('Все основные уроки закрыты по homework в Human20.')
+        return '\n'.join(lines)
+
     lines.append('Текущее состояние по урокам:')
     for lesson in summary['localLessons']:
         evidence = lesson.get('evidenceSummary', {})
@@ -699,7 +776,7 @@ def main():
         return
 
     if args.mode == 'next-action':
-        summary = build_summary(workshop, progress, onboarding, digest, local)
+        summary = build_summary(workshop, progress, onboarding, digest, local, homework_progress, homework_catalogs)
         result = build_next_action(summary)
         text = build_human_next_action(result)
         sync_text = build_human_sync(sync_result)
@@ -711,7 +788,7 @@ def main():
         print(json.dumps(experiment, ensure_ascii=False, indent=2))
         return
 
-    summary = build_summary(workshop, progress, onboarding, digest, local)
+    summary = build_summary(workshop, progress, onboarding, digest, local, homework_progress, homework_catalogs)
     if args.mode == 'human':
         text = build_human_output(summary)
         sync_text = build_human_sync(sync_result)

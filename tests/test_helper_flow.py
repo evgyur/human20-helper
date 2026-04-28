@@ -91,6 +91,49 @@ class Human20HelperFlowTests(unittest.TestCase):
         self.assertIn('пока не найдено локально:', text)
         self.assertIn('что делать сейчас:', text)
 
+    def test_build_summary_falls_back_to_homework_when_progress_is_empty(self):
+        local = {
+            'lessons': [
+                {'id': 'lesson-1', 'title': 'Lesson 1', 'status': 'manual', 'nextStep': 'finish lesson 1', 'fallbackQuestions': []},
+                {'id': 'lesson-2', 'title': 'Lesson 2', 'status': 'manual', 'nextStep': 'finish lesson 2', 'fallbackQuestions': []},
+            ]
+        }
+        workshop = {'lessons': [{'id': 'lesson-2', 'href': '/content/lesson-2'}]}
+        progress = {'completedItems': [], 'activeItem': None, 'completedCount': None}
+        homework = {'progress': {'lesson-1': ['l1-1', 'l1-2', 'l1-3', 'l1-4'], 'lesson-2': ['l2-1']}}
+
+        summary = helper_flow.build_summary(workshop, progress, {}, {}, local, homework)
+
+        self.assertTrue(summary['useHomeworkProgress'])
+        self.assertEqual(summary['homeworkLessons'][0]['lessonId'], 'lesson-1')
+        self.assertTrue(summary['homeworkLessons'][0]['done'])
+        lesson2 = next(item for item in summary['homeworkLessons'] if item['lessonId'] == 'lesson-2')
+        self.assertFalse(lesson2['done'])
+        self.assertEqual(summary['nextLesson']['id'], 'lesson-2')
+
+    def test_human_output_formats_homework_fallback(self):
+        summary = {
+            'useHomeworkProgress': True,
+            'homeworkLessons': [
+                {'lessonId': 'lesson-1', 'completedCount': 4, 'expectedCount': 4, 'done': True},
+                {'lessonId': 'lesson-2', 'completedCount': 2, 'expectedCount': 2, 'done': True},
+            ],
+            'nextLesson': {
+                'id': None,
+                'title': None,
+                'href': None,
+                'nextStep': 'Все основные уроки локально подтверждены.',
+                'practicalActions': [],
+            },
+            'localLessons': [],
+        }
+
+        text = helper_flow.build_human_output(summary)
+
+        self.assertIn('Текущее состояние по урокам (по homework в Human20):', text)
+        self.assertIn('- lesson-1: завершено (4/4)', text)
+        self.assertIn('Все основные уроки закрыты по homework в Human20.', text)
+
     def test_build_verify_reports_missing_required(self):
         local = {
             'lessons': [
