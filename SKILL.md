@@ -14,6 +14,7 @@ Use this skill when an agent needs to understand or operate against Human20 thro
 
 Current scope:
 - inspect workshop state and content;
+- find and recommend Human20 skills for a user's task;
 - read lesson detail/transcripts/homework/favorites/search results;
 - compare local OpenClaw state against lesson progression rules;
 - guide the user through a test-safe trainer/orchestrator flow for lesson progression.
@@ -47,9 +48,12 @@ Run from this repository root:
 python scripts/entrypoint.py status
 python scripts/entrypoint.py where-am-i --user-id tg:123
 python scripts/entrypoint.py what-new
+python scripts/entrypoint.py skill-search "telegram digest"
+python scripts/entrypoint.py skill-recommend "какой скил подойдёт для Telegram канала" --human
 python scripts/entrypoint.py chat-search "openclaw"
 python scripts/entrypoint.py lesson-context lesson-1 --user-id tg:123
 python scripts/entrypoint.py "где я сейчас"
+python scripts/entrypoint.py "какой скил мне подойдёт для Telegram канала"
 python scripts/entrypoint.py "урок 4"
 python scripts/entrypoint.py "тестовый режим"
 ```
@@ -57,6 +61,7 @@ python scripts/entrypoint.py "тестовый режим"
 ## What The Skill Can Inspect
 
 - current workshop/content state;
+- Human20 skill catalog search and task-based skill recommendations;
 - onboarding state and next recommended move;
 - Pulse summaries;
 - workshop chat JSON;

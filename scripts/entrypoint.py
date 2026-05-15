@@ -21,6 +21,9 @@ EXPECTED_TOOLS = {
     "get_transcript",
     "get_homework_progress",
     "get_homework_catalog",
+    "get_human20_skills_catalog",
+    "get_human20_skill",
+    "recommend_human20_skills",
     "preview_user_message",
     "send_user_message",
 }
@@ -82,6 +85,143 @@ def chat_search(client: Human20McpClient, query: str) -> dict[str, Any]:
     }
 
 
+def _skill_items(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _skill_matches(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    matches = payload.get("matches")
+    if isinstance(matches, list):
+        return [item for item in matches if isinstance(item, dict)]
+    return []
+
+
+def _skill_record(match_or_skill: dict[str, Any]) -> dict[str, Any]:
+    skill = match_or_skill.get("skill")
+    if isinstance(skill, dict):
+        return skill
+    return match_or_skill
+
+
+def _skill_blob(skill: dict[str, Any]) -> str:
+    fields = [
+        skill.get("slug"),
+        skill.get("title"),
+        skill.get("summary"),
+        *(skill.get("tags") or []),
+        *(skill.get("useCases") or []),
+    ]
+    return json.dumps(fields, ensure_ascii=False).lower()
+
+
+def _compact_skill(skill: dict[str, Any], *, score: int | None = None, why: str | None = None) -> dict[str, Any]:
+    return {
+        "slug": skill.get("slug"),
+        "title": skill.get("title"),
+        "summary": skill.get("summary"),
+        "tags": skill.get("tags") or [],
+        "useCases": skill.get("useCases") or [],
+        "docsUrl": skill.get("docsUrl"),
+        "zipUrl": skill.get("zipUrl"),
+        "githubUrl": skill.get("githubUrl"),
+        "score": score,
+        "whyRecommended": why,
+    }
+
+
+def skill_search(client: Human20McpClient, query: str, limit: int = 10) -> dict[str, Any]:
+    catalog = client.structured_tool("get_human20_skills_catalog", {})
+    terms = [term for term in re.split(r"\s+", query.lower().strip()) if len(term) > 2]
+    matches = []
+    for skill in _skill_items(catalog):
+        blob = _skill_blob(skill)
+        hit_terms = [term for term in terms if term in blob]
+        if not hit_terms:
+            continue
+        score = len(set(hit_terms)) * 10
+        if any(term in str(skill.get("title", "")).lower() for term in hit_terms):
+            score += 20
+        matches.append(_compact_skill(skill, score=score, why=f"Найдено по словам: {', '.join(sorted(set(hit_terms))[:5])}."))
+
+    matches.sort(key=lambda item: (item.get("score") or 0, item.get("title") or ""), reverse=True)
+    return {
+        "query": query,
+        "count": len(matches),
+        "matches": matches[:limit],
+        "truncated": len(matches) > limit,
+        "source": "get_human20_skills_catalog",
+    }
+
+
+def recommend_skills(client: Human20McpClient, task: str, limit: int = 5) -> dict[str, Any]:
+    recommended = client.structured_tool("recommend_human20_skills", {"task": task})
+    matches = []
+    for match in _skill_matches(recommended):
+        skill = _skill_record(match)
+        matches.append(
+            _compact_skill(
+                skill,
+                score=match.get("score") if isinstance(match.get("score"), int) else None,
+                why=match.get("whyRecommended"),
+            )
+        )
+
+    fallback_used = False
+    if not matches:
+        fallback = skill_search(client, task, limit=limit)
+        matches = fallback["matches"]
+        fallback_used = True
+
+    return {
+        "task": task,
+        "count": len(matches),
+        "matches": matches[:limit],
+        "truncated": len(matches) > limit,
+        "source": "recommend_human20_skills" if not fallback_used else "catalog_text_fallback",
+        "fallbackUsed": fallback_used,
+    }
+
+
+def build_human_skill_recommendation(result: dict[str, Any]) -> str:
+    lines = [f"Подбор скилов: {result['task']}"]
+    matches = result.get("matches") or []
+    if not matches:
+        lines.append("- подходящих скилов не нашёл. Сформулируй задачу конкретнее: канал, инструмент, цель, что должно получиться.")
+        return "\n".join(lines)
+
+    for index, item in enumerate(matches[:5], start=1):
+        title = item.get("title") or item.get("slug")
+        slug = item.get("slug")
+        summary = item.get("summary")
+        why = item.get("whyRecommended")
+        docs_url = item.get("docsUrl")
+        zip_url = item.get("zipUrl")
+        github_url = item.get("githubUrl")
+        lines.append(f"{index}. {title} (`{slug}`)")
+        if summary:
+            lines.append(f"   - зачем: {summary}")
+        if why:
+            lines.append(f"   - почему подходит: {why}")
+        if docs_url:
+            lines.append(f"   - страница: https://human20.app{docs_url}" if docs_url.startswith("/") else f"   - страница: {docs_url}")
+        if github_url:
+            lines.append(f"   - GitHub: {github_url}")
+        if zip_url:
+            lines.append(f"   - ZIP: {zip_url}")
+
+    if result.get("fallbackUsed"):
+        lines.append("")
+        lines.append("Примечание: точная рекомендация не дала совпадений, поэтому использован текстовый поиск по каталогу.")
+    return "\n".join(lines)
+
+
 def lesson_context(client: Human20McpClient, item_id: str, user_id: str | None) -> dict[str, Any]:
     detail = client.structured_tool("get_content_detail", {"item_id": item_id})
     transcript = client.structured_tool("get_transcript", {"item_id": item_id})
@@ -112,6 +252,10 @@ def run_helper(args: list[str]) -> int:
 
 def infer_mode(query: str):
     q = query.lower().strip()
+    skill_intent = any(x in q for x in ["скил", "skill", "навык", "подойд", "посоветуй", "подбери", "какой инструмент"])
+    if skill_intent:
+        return ("skill-recommend", None, None)
+
     verify_intent = any(x in q for x in ["проверь, что я сделал", "проверь что я сделал", "что не хватает", "чего не хватает", "проверь", "провер"])
     if verify_intent:
         lesson_match = re.search(r"lesson-(\d+)|урок\w*\s*(\d+)", q)
@@ -147,7 +291,7 @@ def infer_mode(query: str):
 
 
 def main() -> int:
-    commands = {"status", "where-am-i", "what-new", "chat-search", "lesson-context"}
+    commands = {"status", "where-am-i", "what-new", "chat-search", "lesson-context", "skill-search", "skill-recommend"}
     if len(sys.argv) > 1 and sys.argv[1] in commands:
         parser = argparse.ArgumentParser(description="Human20 helper skill entrypoint")
         subparsers = parser.add_subparsers(dest="command", required=True)
@@ -161,6 +305,15 @@ def main() -> int:
 
         search = subparsers.add_parser("chat-search")
         search.add_argument("query")
+
+        skill_search_parser = subparsers.add_parser("skill-search")
+        skill_search_parser.add_argument("query")
+        skill_search_parser.add_argument("--limit", type=int, default=10)
+
+        skill_recommend = subparsers.add_parser("skill-recommend")
+        skill_recommend.add_argument("task")
+        skill_recommend.add_argument("--limit", type=int, default=5)
+        skill_recommend.add_argument("--human", action="store_true")
 
         lesson = subparsers.add_parser("lesson-context")
         lesson.add_argument("item_id")
@@ -177,6 +330,13 @@ def main() -> int:
             result = what_new(client)
         elif args.command == "chat-search":
             result = chat_search(client, args.query)
+        elif args.command == "skill-search":
+            result = skill_search(client, args.query, limit=args.limit)
+        elif args.command == "skill-recommend":
+            result = recommend_skills(client, args.task, limit=args.limit)
+            if args.human:
+                print(build_human_skill_recommendation(result))
+                return 0
         elif args.command == "lesson-context":
             result = lesson_context(client, args.item_id, args.user_id)
         else:
@@ -187,7 +347,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="human20-helper smart entrypoint")
     parser.add_argument("query", nargs="*", help="Natural language intent")
-    parser.add_argument("--mode", choices=["human", "continue", "verify", "next-action", "changed-since", "whats-new", "test-trainer", "autopass-experiment"])
+    parser.add_argument("--mode", choices=["human", "continue", "verify", "next-action", "changed-since", "whats-new", "skill-recommend", "test-trainer", "autopass-experiment"])
     parser.add_argument("--lesson")
     parser.add_argument("--since")
     args = parser.parse_args()
@@ -208,6 +368,11 @@ def main() -> int:
             return run_helper(helper_args)
         if args.mode == "next-action":
             return run_helper(["--mode", "next-action"])
+        if args.mode == "skill-recommend":
+            task = " ".join(args.query).strip()
+            client = Human20McpClient()
+            print(build_human_skill_recommendation(recommend_skills(client, task)))
+            return 0
         return run_helper(["--mode", args.mode])
 
     query = " ".join(args.query).strip()
@@ -225,6 +390,10 @@ def main() -> int:
         return run_helper(["--mode", "changed-since", "--since", since])
     if mode == "whats-new":
         return run_helper(["--mode", "whats-new"])
+    if mode == "skill-recommend":
+        client = Human20McpClient()
+        print(build_human_skill_recommendation(recommend_skills(client, query)))
+        return 0
     if mode == "test-trainer":
         return run_helper(["--mode", "test-trainer"])
     return run_helper(["--mode", "human"])

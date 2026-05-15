@@ -9,6 +9,7 @@ Source of truth теперь находится прямо в `skills/human20-he
 
 - читает структуру и guidance из Human20 через direct MCP session flow;
 - не зависит от проблемного OpenClaw MCP bridge;
+- ищет и рекомендует Human20-скилы по задаче пользователя;
 - локально сверяет прохождение уроков по workspace/config/memory/project evidence;
 - определяет следующий непройденный или не подтверждённый этап;
 - возвращает ссылку на урок и practical next step;
@@ -91,8 +92,25 @@ python3 skills/human20-helper/scripts/entrypoint.py "тестовый режим
 ```bash
 python3 skills/human20-helper/scripts/entrypoint.py status
 python3 skills/human20-helper/scripts/entrypoint.py where-am-i --user-id tg:123
+python3 skills/human20-helper/scripts/entrypoint.py skill-search "telegram digest"
+python3 skills/human20-helper/scripts/entrypoint.py skill-recommend "какой скил подойдёт для Telegram канала" --human
 python3 skills/human20-helper/scripts/entrypoint.py chat-search "openclaw"
 python3 skills/human20-helper/scripts/entrypoint.py lesson-context lesson-1 --user-id tg:123
+```
+
+## Skill recommendations
+
+Для вопросов вроде `какой скил мне подойдёт`, `подбери скил для Telegram`,
+`посоветуй навык для дайджеста` entrypoint теперь сразу идёт в Human20 MCP:
+
+1. вызывает `recommend_human20_skills`;
+2. если точная рекомендация пустая, делает fallback-поиск по каталогу через `get_human20_skills_catalog`;
+3. возвращает название, slug, объяснение, страницу на human20.app, ZIP и GitHub, если они есть.
+
+Пример:
+
+```bash
+python3 skills/human20-helper/scripts/entrypoint.py "какой скил мне подойдёт для Telegram канала"
 ```
 
 ## Homework sync
