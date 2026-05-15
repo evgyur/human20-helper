@@ -121,6 +121,79 @@ def _skill_blob(skill: dict[str, Any]) -> str:
     return json.dumps(fields, ensure_ascii=False).lower()
 
 
+_SKILL_QUERY_STOPWORDS = {
+    "skill",
+    "skills",
+    "скил",
+    "скилл",
+    "скилы",
+    "скиллы",
+    "навык",
+    "навыки",
+    "какой",
+    "какая",
+    "какие",
+    "мне",
+    "нам",
+    "подойд",
+    "подойдёт",
+    "подойдет",
+    "посоветуй",
+    "подбери",
+    "найди",
+    "для",
+    "про",
+    "что",
+    "как",
+    "и",
+    "или",
+    "the",
+    "for",
+    "with",
+}
+
+
+def _query_terms(query: str) -> list[str]:
+    raw_terms = [term.strip("-_.,!?():;`'\"").lower() for term in re.split(r"\s+", query)]
+    terms = [term for term in raw_terms if len(term) > 2 and term not in _SKILL_QUERY_STOPWORDS]
+    expanded = set(terms)
+    if {"telegram", "телеграм", "tg"} & expanded:
+        expanded.update({"telegram", "телеграм", "tg", "канал", "чат"})
+    if {"digest", "дайджест", "дайджеста", "дайджесты"} & expanded:
+        expanded.update({"digest", "дайджест", "summary", "саммари"})
+    if {"mcp", "api"} & expanded:
+        expanded.update({"mcp", "api", "интеграция", "инструмент"})
+    return sorted(expanded)
+
+
+def _local_skill_score(skill: dict[str, Any], terms: list[str]) -> tuple[int, list[str]]:
+    blob = _skill_blob(skill)
+    title = str(skill.get("title") or "").lower()
+    slug = str(skill.get("slug") or "").lower()
+    summary = str(skill.get("summary") or "").lower()
+    tags = " ".join(str(item).lower() for item in (skill.get("tags") or []))
+    use_cases = " ".join(str(item).lower() for item in (skill.get("useCases") or []))
+
+    score = 0
+    hits: list[str] = []
+    for term in terms:
+        if term not in blob:
+            continue
+        hits.append(term)
+        score += 8
+        if term in title:
+            score += 35
+        if term in slug:
+            score += 25
+        if term in tags:
+            score += 18
+        if term in use_cases:
+            score += 14
+        if term in summary:
+            score += 10
+    return score, sorted(set(hits))
+
+
 def _compact_skill(skill: dict[str, Any], *, score: int | None = None, why: str | None = None) -> dict[str, Any]:
     return {
         "slug": skill.get("slug"),
@@ -138,16 +211,12 @@ def _compact_skill(skill: dict[str, Any], *, score: int | None = None, why: str 
 
 def skill_search(client: Human20McpClient, query: str, limit: int = 10) -> dict[str, Any]:
     catalog = client.structured_tool("get_human20_skills_catalog", {})
-    terms = [term for term in re.split(r"\s+", query.lower().strip()) if len(term) > 2]
+    terms = _query_terms(query)
     matches = []
     for skill in _skill_items(catalog):
-        blob = _skill_blob(skill)
-        hit_terms = [term for term in terms if term in blob]
-        if not hit_terms:
+        score, hit_terms = _local_skill_score(skill, terms)
+        if score <= 0:
             continue
-        score = len(set(hit_terms)) * 10
-        if any(term in str(skill.get("title", "")).lower() for term in hit_terms):
-            score += 20
         matches.append(_compact_skill(skill, score=score, why=f"Найдено по словам: {', '.join(sorted(set(hit_terms))[:5])}."))
 
     matches.sort(key=lambda item: (item.get("score") or 0, item.get("title") or ""), reverse=True)
@@ -162,18 +231,47 @@ def skill_search(client: Human20McpClient, query: str, limit: int = 10) -> dict[
 
 def recommend_skills(client: Human20McpClient, task: str, limit: int = 5) -> dict[str, Any]:
     recommended = client.structured_tool("recommend_human20_skills", {"task": task})
-    matches = []
+    catalog = client.structured_tool("get_human20_skills_catalog", {})
+    catalog_by_slug = {
+        str(skill.get("slug")): skill
+        for skill in _skill_items(catalog)
+        if skill.get("slug")
+    }
+    terms = _query_terms(task)
+    by_slug: dict[str, dict[str, Any]] = {}
+
     for match in _skill_matches(recommended):
         skill = _skill_record(match)
-        matches.append(
-            _compact_skill(
-                skill,
-                score=match.get("score") if isinstance(match.get("score"), int) else None,
-                why=match.get("whyRecommended"),
-            )
+        slug = str(skill.get("slug") or "")
+        if not slug:
+            continue
+        full_skill = catalog_by_slug.get(slug, skill)
+        local_score, hit_terms = _local_skill_score(full_skill, terms)
+        backend_score = match.get("score") if isinstance(match.get("score"), int) else 0
+        combined_score = backend_score + (local_score * 4)
+        if local_score <= 0 and backend_score <= 0:
+            continue
+        why = match.get("whyRecommended")
+        if hit_terms:
+            why = f"{why or 'Подходит по каталогу.'} Прямые совпадения: {', '.join(hit_terms[:5])}."
+        by_slug[slug] = _compact_skill(full_skill, score=combined_score, why=why)
+
+    for skill in catalog_by_slug.values():
+        slug = str(skill.get("slug") or "")
+        local_score, hit_terms = _local_skill_score(skill, terms)
+        if local_score <= 0:
+            continue
+        existing = by_slug.get(slug)
+        local_candidate = _compact_skill(
+            skill,
+            score=local_score * 5,
+            why=f"Прямое совпадение в каталоге: {', '.join(hit_terms[:5])}.",
         )
+        if existing is None or (local_candidate.get("score") or 0) > (existing.get("score") or 0):
+            by_slug[slug] = local_candidate
 
     fallback_used = False
+    matches = sorted(by_slug.values(), key=lambda item: (item.get("score") or 0, item.get("title") or ""), reverse=True)
     if not matches:
         fallback = skill_search(client, task, limit=limit)
         matches = fallback["matches"]

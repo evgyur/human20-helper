@@ -108,6 +108,27 @@ class StubClient:
         raise AssertionError(name)
 
 
+class NoisyRecommendStubClient(StubClient):
+    def structured_tool(self, name, arguments=None):
+        if name == "recommend_human20_skills":
+            return {
+                "matches": [
+                    {
+                        "skill": {
+                            "slug": "workshop-bird-research",
+                            "title": "Bird Research",
+                            "summary": "Поиск сигналов в X/Twitter.",
+                            "tags": ["Исследование"],
+                            "useCases": ["искать сигналы"],
+                        },
+                        "whyRecommended": "Сработало по общему слову skill.",
+                        "score": 120,
+                    }
+                ]
+            }
+        return super().structured_tool(name, arguments)
+
+
 class Human20HelperEntrypointTest(unittest.TestCase):
     def test_status_reports_missing_expected_tools(self) -> None:
         result = entrypoint.status(StubClient())
@@ -130,12 +151,17 @@ class Human20HelperEntrypointTest(unittest.TestCase):
         result = entrypoint.recommend_skills(StubClient(), "какой скил подойдёт для telegram канала")
         self.assertFalse(result["fallbackUsed"])
         self.assertEqual(result["matches"][0]["slug"], "telegram-chip")
-        self.assertEqual(result["matches"][0]["score"], 42)
+        self.assertGreater(result["matches"][0]["score"], 42)
 
-    def test_recommend_skills_falls_back_to_catalog_search(self) -> None:
+    def test_recommend_skills_uses_catalog_when_backend_has_no_match(self) -> None:
         result = entrypoint.recommend_skills(StubClient(), "создать skill")
-        self.assertTrue(result["fallbackUsed"])
+        self.assertFalse(result["fallbackUsed"])
         self.assertEqual(result["matches"][0]["slug"], "workshop-create-skill-practice")
+
+    def test_recommend_skills_reranks_with_catalog_exact_match(self) -> None:
+        result = entrypoint.recommend_skills(NoisyRecommendStubClient(), "какой скил подойдёт для telegram канала")
+        self.assertEqual(result["matches"][0]["slug"], "telegram-chip")
+        self.assertGreater(result["matches"][0]["score"], result["matches"][1]["score"])
 
     def test_human_skill_recommendation_contains_links(self) -> None:
         result = entrypoint.recommend_skills(StubClient(), "какой скил подойдёт для telegram канала")
