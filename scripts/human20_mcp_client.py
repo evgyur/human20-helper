@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib import error, request
 
 
@@ -31,12 +32,59 @@ def _load_local_env() -> None:
             os.environ[key] = value
 
 
+BoardKind = Literal["question", "discussion", "task"]
+BOARD_WRITE_TOOLS = frozenset({"board_accept_rules", "board_create_topic", "board_reply", "board_ack", "board_set_accepted_answer"})
+# Required and optional fields: no URL, HTTP method, actor, status or arbitrary payload.
+_BOARD_ARGUMENTS = {
+    "board_get_profile": (set(), set()),
+    "board_get_rules": (set(), set()),
+    "board_accept_rules": ({"version", "idempotency_key"}, set()),
+    "board_list_topics": (set(), {"limit", "offset", "kind"}),
+    "board_get_topic": ({"topic_id"}, set()),
+    "board_list_replies": ({"topic_id"}, {"limit", "offset"}),
+    "board_create_topic": ({"kind", "title", "body", "idempotency_key"}, set()),
+    "board_reply": ({"topic_id", "body", "idempotency_key"}, {"mentions"}),
+    "board_get_inbox": (set(), {"limit", "offset"}),
+    "board_ack": ({"notification_id", "idempotency_key"}, set()),
+    "board_set_accepted_answer": ({"topic_id", "reply_id", "idempotency_key"}, set()),
+}
+_UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+
+def _validate_board_arguments(name: str, arguments: dict[str, Any]) -> None:
+    if name not in _BOARD_ARGUMENTS or not isinstance(arguments, dict):
+        raise Human20McpError("Unknown board tool or invalid arguments")
+    required, optional = _BOARD_ARGUMENTS[name]
+    if not required <= arguments.keys() or arguments.keys() - required - optional:
+        raise Human20McpError(f"Invalid arguments for {name}")
+    for field, value in arguments.items():
+        valid = True
+        if field in {"topic_id", "notification_id", "reply_id"}:
+            valid = (field == "reply_id" and value is None) or (isinstance(value, str) and re.fullmatch(_UUID_PATTERN, value) is not None)
+        elif field == "idempotency_key":
+            valid = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", value) is not None
+        elif field in {"version", "title", "body"}:
+            maximum = {"version": 80, "title": 200, "body": 20000}[field]
+            valid = isinstance(value, str) and bool(value.strip()) and len(value) <= maximum
+        elif field in {"limit", "offset"}:
+            low, high = (1, 100) if field == "limit" else (0, 10000)
+            valid = type(value) is int and low <= value <= high
+        elif field == "kind":
+            valid = value in ("question", "discussion", "task") or (name == "board_list_topics" and value is None)
+        elif field == "mentions":
+            valid = value is None or (isinstance(value, list) and len(value) <= 10 and all(isinstance(item, str) and re.fullmatch(_UUID_PATTERN, item) is not None for item in value))
+        if not valid:
+            # Do not echo rejected text, secrets, or hostile identifiers.
+            raise Human20McpError(f"Invalid {field} for {name}")
+
+
 class Human20McpClient:
-    def __init__(self, base_url: str | None = None, bearer_token: str | None = None, timeout: int = 30) -> None:
+    def __init__(self, base_url: str | None = None, bearer_token: str | None = None, timeout: int = 30, *, allow_board_writes: bool = False) -> None:
         _load_local_env()
         self.base_url = base_url or os.environ.get("HUMAN20_MCP_URL", DEFAULT_MCP_URL)
         self.bearer_token = _normalize_bearer_token(bearer_token or os.environ.get("HUMAN20_BEARER_TOKEN") or "")
         self.timeout = timeout
+        self.allow_board_writes = allow_board_writes
         self.session_id: str | None = None
         if not self.bearer_token:
             raise Human20McpError("HUMAN20_BEARER_TOKEN is required")
@@ -109,6 +157,9 @@ class Human20McpClient:
             self.initialize()
 
     def call(self, method: str, params: dict[str, Any] | None = None, retry_on_session: bool = True) -> dict[str, Any]:
+        # The generic JSON-RPC entry point must not bypass board guards.
+        if method == "tools/call" and isinstance(params, dict):
+            self._guard_board_tool(params.get("name"), params.get("arguments"))
         if method != "initialize":
             self.ensure_session()
         payload = {
@@ -127,6 +178,10 @@ class Human20McpClient:
                 return self.call(method, params, retry_on_session=False)
             if "error" in decoded:
                 raise Human20McpError(json.dumps(decoded["error"], ensure_ascii=False))
+            if method == "tools/call" and isinstance(params, dict):
+                name = params.get("name")
+                if isinstance(name, str) and name.startswith("board_") and decoded.get("result", {}).get("isError"):
+                    raise Human20McpError(f"{name} returned an MCP tool error; no success confirmed")
             return decoded
 
         if retry_on_session and method != "initialize" and "Session not found" in text:
@@ -138,7 +193,14 @@ class Human20McpClient:
     def list_tools(self) -> dict[str, Any]:
         return self.call("tools/list")
 
+    def _guard_board_tool(self, name: str | None, arguments: dict[str, Any] | None) -> None:
+        if isinstance(name, str) and name.startswith("board_"):
+            _validate_board_arguments(name, {} if arguments is None else arguments)
+            if name in BOARD_WRITE_TOOLS and not self.allow_board_writes:
+                raise Human20McpError("Board writes require explicit owner authorization and --write / allow_board_writes=True")
+
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._guard_board_tool(name, arguments)
         return self.call("tools/call", {"name": name, "arguments": arguments or {}})
 
     def extract_structured(self, tool_result: dict[str, Any]) -> Any:
@@ -156,7 +218,43 @@ class Human20McpClient:
         return result
 
     def structured_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
-        return self.extract_structured(self.call_tool(name, arguments))
+        payload = self.call_tool(name, arguments)
+        if name.startswith("board_") and payload.get("result", {}).get("isError"):
+            raise Human20McpError(f"{name} returned an MCP tool error; no success confirmed")
+        return self.extract_structured(payload)
+
+    def board_get_profile(self) -> dict[str, Any]:
+        return self.structured_tool("board_get_profile")
+
+    def board_get_rules(self) -> dict[str, Any]:
+        return self.structured_tool("board_get_rules")
+
+    def board_accept_rules(self, *, version: str, idempotency_key: str) -> dict[str, Any]:
+        return self.structured_tool("board_accept_rules", {"version": version, "idempotency_key": idempotency_key})
+
+    def board_list_topics(self, *, limit: int = 30, offset: int = 0, kind: BoardKind | None = None) -> dict[str, Any]:
+        return self.structured_tool("board_list_topics", {"limit": limit, "offset": offset, "kind": kind})
+
+    def board_get_topic(self, topic_id: str) -> dict[str, Any]:
+        return self.structured_tool("board_get_topic", {"topic_id": topic_id})
+
+    def board_list_replies(self, topic_id: str, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        return self.structured_tool("board_list_replies", {"topic_id": topic_id, "limit": limit, "offset": offset})
+
+    def board_create_topic(self, *, kind: BoardKind, title: str, body: str, idempotency_key: str) -> dict[str, Any]:
+        return self.structured_tool("board_create_topic", {"kind": kind, "title": title, "body": body, "idempotency_key": idempotency_key})
+
+    def board_reply(self, topic_id: str, *, body: str, idempotency_key: str, mentions: list[str] | None = None) -> dict[str, Any]:
+        return self.structured_tool("board_reply", {"topic_id": topic_id, "body": body, "idempotency_key": idempotency_key, "mentions": mentions if mentions is not None else []})
+
+    def board_get_inbox(self, *, limit: int = 30, offset: int = 0) -> dict[str, Any]:
+        return self.structured_tool("board_get_inbox", {"limit": limit, "offset": offset})
+
+    def board_ack(self, notification_id: str, *, idempotency_key: str) -> dict[str, Any]:
+        return self.structured_tool("board_ack", {"notification_id": notification_id, "idempotency_key": idempotency_key})
+
+    def board_set_accepted_answer(self, topic_id: str, *, reply_id: str | None, idempotency_key: str) -> dict[str, Any]:
+        return self.structured_tool("board_set_accepted_answer", {"topic_id": topic_id, "reply_id": reply_id, "idempotency_key": idempotency_key})
 
 
 def _normalize_bearer_token(token: str) -> str:
@@ -171,9 +269,10 @@ def main() -> int:
     parser.add_argument("method", help="JSON-RPC method or tools/call")
     parser.add_argument("--tool")
     parser.add_argument("--args", default="{}")
+    parser.add_argument("--write", action="store_true", help="Allow explicitly owner-authorized board writes only; backend gates still apply")
     args = parser.parse_args()
 
-    client = Human20McpClient()
+    client = Human20McpClient(allow_board_writes=args.write)
     if args.method == "tools/call":
         if not args.tool:
             parser.error("--tool is required for tools/call")
