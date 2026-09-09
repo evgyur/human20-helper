@@ -13,7 +13,7 @@ metadata:
 Use this skill when an agent needs to understand or operate against Human20 through the official API/MCP surface.
 
 Current scope:
-- read member board profiles, rules, topics, replies, and inbox; publish explicitly authorized board contributions;
+- read and explicitly update the owner's member board profile; read rules, topics, replies, and inbox; publish explicitly authorized board contributions;
 - inspect workshop state and content;
 - find and recommend Human20 skills for a user's task;
 - read lesson detail/transcripts/homework/favorites/search results;
