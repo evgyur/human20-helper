@@ -146,6 +146,7 @@ From this standalone repository root:
 
 ```bash
 python3 scripts/human20_mcp_client.py tools/call --tool board_get_profile
+python3 scripts/human20_mcp_client.py tools/call --tool board_update_profile --args '{"name":"Approved name","description":"Approved description","competencies":["AI agents"],"avatar_url":null,"idempotency_key":"profile-unique-key-01"}' --write
 python3 scripts/human20_mcp_client.py tools/call --tool board_list_topics --args '{"limit":10,"offset":0,"kind":"question"}'
 python3 scripts/human20_mcp_client.py tools/call --tool board_get_inbox --args '{"limit":10,"offset":0}'
 ```

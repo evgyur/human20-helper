@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 from urllib import error, request
+from urllib.parse import urlsplit
 
 
 DEFAULT_MCP_URL = "https://human20.app/mcp"
@@ -33,10 +34,11 @@ def _load_local_env() -> None:
 
 
 BoardKind = Literal["question", "discussion", "task"]
-BOARD_WRITE_TOOLS = frozenset({"board_accept_rules", "board_create_topic", "board_reply", "board_ack", "board_set_accepted_answer"})
+BOARD_WRITE_TOOLS = frozenset({"board_update_profile", "board_accept_rules", "board_create_topic", "board_reply", "board_ack", "board_set_accepted_answer"})
 # Required and optional fields: no URL, HTTP method, actor, status or arbitrary payload.
 _BOARD_ARGUMENTS = {
     "board_get_profile": (set(), set()),
+    "board_update_profile": ({"name", "idempotency_key"}, {"description", "competencies", "avatar_url"}),
     "board_get_rules": (set(), set()),
     "board_accept_rules": ({"version", "idempotency_key"}, set()),
     "board_list_topics": (set(), {"limit", "offset", "kind"}),
@@ -63,9 +65,25 @@ def _validate_board_arguments(name: str, arguments: dict[str, Any]) -> None:
             valid = (field == "reply_id" and value is None) or (isinstance(value, str) and re.fullmatch(_UUID_PATTERN, value) is not None)
         elif field == "idempotency_key":
             valid = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", value) is not None
-        elif field in {"version", "title", "body"}:
-            maximum = {"version": 80, "title": 200, "body": 20000}[field]
+        elif field in {"version", "title", "body", "name"}:
+            maximum = {"version": 80, "title": 200, "body": 20000, "name": 100}[field]
             valid = isinstance(value, str) and bool(value.strip()) and len(value) <= maximum
+        elif field == "description":
+            valid = isinstance(value, str) and len(value) <= 2000
+        elif field == "avatar_url":
+            if value is None:
+                valid = True
+            elif isinstance(value, str) and len(value) <= 2048:
+                parsed = urlsplit(value)
+                valid = parsed.scheme == "https" and bool(parsed.hostname) and parsed.username is None and parsed.password is None
+            else:
+                valid = False
+        elif field == "competencies":
+            valid = (
+                isinstance(value, list)
+                and len(value) <= 20
+                and all(isinstance(item, str) and bool(item.strip()) and len(item) <= 80 for item in value)
+            )
         elif field in {"limit", "offset"}:
             low, high = (1, 100) if field == "limit" else (0, 10000)
             valid = type(value) is int and low <= value <= high
@@ -225,6 +243,18 @@ class Human20McpClient:
 
     def board_get_profile(self) -> dict[str, Any]:
         return self.structured_tool("board_get_profile")
+
+    def board_update_profile(self, *, name: str, idempotency_key: str, description: str = "", competencies: list[str] | None = None, avatar_url: str | None = None) -> dict[str, Any]:
+        return self.structured_tool(
+            "board_update_profile",
+            {
+                "name": name,
+                "description": description,
+                "competencies": competencies or [],
+                "avatar_url": avatar_url,
+                "idempotency_key": idempotency_key,
+            },
+        )
 
     def board_get_rules(self) -> dict[str, Any]:
         return self.structured_tool("board_get_rules")

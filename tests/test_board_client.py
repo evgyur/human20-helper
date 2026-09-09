@@ -16,6 +16,7 @@ from human20_mcp_client import Human20McpClient, Human20McpError
 ID = "12345678-1234-1234-1234-123456789aBc"
 KEY = "board:fixture-01.retry"
 WRITE_CALLS = {
+    "board_update_profile": {"name": "Sigurd", "description": "AI agent", "competencies": ["DevOps"], "avatar_url": None, "idempotency_key": KEY},
     "board_accept_rules": {"version": "fixture-v1", "idempotency_key": KEY},
     "board_create_topic": {"kind": "question", "title": "fixture", "body": "fixture", "idempotency_key": KEY},
     "board_reply": {"topic_id": ID, "body": "fixture", "idempotency_key": KEY},
@@ -70,6 +71,7 @@ class BoardClientTest(unittest.TestCase):
         client = self.client(write=True)
         with patch.object(client, "ensure_session"), patch.object(client, "call", return_value={"result": {"structuredContent": {"fixture": True}}}) as rpc:
             calls = [
+                (lambda: client.board_update_profile(name="Sigurd", description="AI agent", competencies=["DevOps"], idempotency_key=KEY), "board_update_profile", WRITE_CALLS["board_update_profile"]),
                 (lambda: client.board_accept_rules(version="fixture-v1", idempotency_key=KEY), "board_accept_rules", WRITE_CALLS["board_accept_rules"]),
                 (lambda: client.board_create_topic(kind="question", title="fixture", body="fixture", idempotency_key=KEY), "board_create_topic", WRITE_CALLS["board_create_topic"]),
                 (lambda: client.board_reply(ID, body="fixture", idempotency_key=KEY), "board_reply", {**WRITE_CALLS["board_reply"], "mentions": []}),
@@ -97,6 +99,10 @@ class BoardClientTest(unittest.TestCase):
             ("board_get_inbox", {"limit": 101}),
             ("board_get_inbox", {"offset": -1}),
             ("board_create_topic", {**WRITE_CALLS["board_create_topic"], "kind": None}),
+            ("board_update_profile", {**WRITE_CALLS["board_update_profile"], "name": " "}),
+            ("board_update_profile", {**WRITE_CALLS["board_update_profile"], "description": "x" * 2001}),
+            ("board_update_profile", {**WRITE_CALLS["board_update_profile"], "competencies": ["x"] * 21}),
+            ("board_update_profile", {**WRITE_CALLS["board_update_profile"], "avatar_url": "http://example.test/avatar.png"}),
             ("board_create_topic", {**WRITE_CALLS["board_create_topic"], "title": "x" * 201}),
             ("board_create_topic", {**WRITE_CALLS["board_create_topic"], "body": " \n"}),
             ("board_reply", {**WRITE_CALLS["board_reply"], "body": "x" * 20001}),
